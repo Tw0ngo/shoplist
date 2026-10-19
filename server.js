@@ -9,8 +9,6 @@ const HOST = process.env.HOST || '127.0.0.1';
 const DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DB = path.join(DIR, 'db.json');
 const PUB = path.join(__dirname, 'public');
-// browsers only send Secure cookies over https; COOKIE_SECURE=0 for local testing
-const SECURE = process.env.COOKIE_SECURE !== '0';
 // priorities: green = unwichtig, yellow = relevant, red = ganz wichtig
 const COLORS = ['green', 'yellow', 'red'];
 const KINDS = ['list', 'staples'];
@@ -43,59 +41,24 @@ const now = () => Date.now();
 const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex');
 const secret = () => crypto.randomBytes(32).toString('base64url');
 
-// secrets come from a file named in the environment (Docker secret) or from systemd (LoadCredential=<name>:...)
-function credential(name, envFile) {
-  const file = process.env[envFile] || (process.env.CREDENTIALS_DIRECTORY && path.join(process.env.CREDENTIALS_DIRECTORY, name));
-  return file && fs.existsSync(file) ? fs.readFileSync(file, 'utf8').trim() : null;
-}
-
-/* ---------------- storage: one JSON file, AES-256-GCM encrypted at rest ---------------- */
-// without a key (local testing) the file stays plain
-const KEY = (() => {
-  const hex = credential('dbkey', 'DB_KEY_FILE');
-  if (!hex) return null;
-  if (!/^[0-9a-f]{64}$/i.test(hex)) throw new Error('db key must be 64 hex characters');
-  return Buffer.from(hex, 'hex');
-})();
-
-function encode(obj) {
-  const json = JSON.stringify(obj);
-  if (!KEY) return json;
-  const iv = crypto.randomBytes(12);
-  const c = crypto.createCipheriv('aes-256-gcm', KEY, iv);
-  const data = Buffer.concat([c.update(json, 'utf8'), c.final()]);
-  return JSON.stringify({ enc: 'aes-256-gcm', iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: data.toString('base64') });
-}
-
-function decode(text) {
-  const o = JSON.parse(text);
-  if (!o.enc) return o;
-  if (!KEY) throw new Error('db.json is encrypted, but no key is configured');
-  const d = crypto.createDecipheriv('aes-256-gcm', KEY, Buffer.from(o.iv, 'base64'));
-  d.setAuthTag(Buffer.from(o.tag, 'base64'));
-  return JSON.parse(Buffer.concat([d.update(Buffer.from(o.data, 'base64')), d.final()]).toString('utf8'));
-}
-
 // db: { groups: [{id, name, admins: [user ids], version, lists}], users: [{…, groups: [ids], lists, version}], sessions, invites }
 // shared lists live in their group, private lists in their user; sessions and invites only keep a sha256
-let db, plain = false;
+let db;
 try {
-  const text = fs.readFileSync(DB, 'utf8');
-  db = decode(text);
-  plain = KEY && !JSON.parse(text).enc;
+  db = JSON.parse(fs.readFileSync(DB, 'utf8'));
 } catch (e) {
-  // a broken or undecryptable db.json must not be replaced by an empty one
+  // a broken db.json must not be replaced by an empty one
   if (e.code !== 'ENOENT') throw e;
   db = { groups: [], users: [], sessions: [], invites: [] };
   fs.mkdirSync(DIR, { recursive: true });
 }
-if (plain || !fs.existsSync(DB)) save();
+if (!fs.existsSync(DB)) save();
 
 // bumps the version of every group or user whose lists changed, so open apps fetch them again
 function save(...changed) {
   for (const c of changed) c.version++;
   const tmp = DB + '.tmp';
-  fs.writeFileSync(tmp, encode(db), { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify(db), { mode: 0o600 });
   fs.renameSync(tmp, DB);
 }
 
@@ -183,8 +146,10 @@ function cookie(req, name) {
     if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
   }
 }
+// Secure only when the visitor came over https (directly or through a proxy), so plain http at home works too
 function setCookie(res, value, maxAge) {
-  res.setHeader('Set-Cookie', `sid=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` + (SECURE ? '; Secure' : ''));
+  const https = res.req.socket.encrypted || res.req.headers['x-forwarded-proto'] === 'https';
+  res.setHeader('Set-Cookie', `sid=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}` + (https ? '; Secure' : ''));
 }
 
 function startSession(res, user) {
@@ -671,6 +636,5 @@ if (process.argv[2] === 'reset-password') {
     console.log(`new password for ${user.name}: ${password}`);
   });
 } else server.listen(PORT, HOST, () => {
-  console.log(`shopping list on ${HOST}:${PORT}` + (KEY ? ', db encrypted' : ', db NOT encrypted (no key)') +
-    `, registration ${REGISTRATION}`);
+  console.log(`shopping list on ${HOST}:${PORT}, registration ${REGISTRATION}`);
 });

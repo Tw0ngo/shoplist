@@ -6,37 +6,25 @@ Shared shopping lists and pantry lists for you and your groups – a small web a
 - Pantry lists: mark what runs low, move it onto the shopping list with one tap
 - Works offline; changes are sent once the connection is back
 - German and English
-- No email, no tracking, no external requests: accounts are just a username and a password (stored as a scrypt hash)
+- No email, no tracking, no external requests: accounts are just a username and a password
 
 ## Run it
 
-You need Docker with Compose and a reverse proxy that serves HTTPS (needed for sign-in cookies and the home screen app).
+You need [Docker](https://docs.docker.com/get-docker/). Then, in this folder:
 
 ```sh
-mkdir -p secrets
-openssl rand -hex 32 > secrets/dbkey      # key for the encrypted database – keep a copy somewhere safe
-docker compose up -d --build
+docker compose up -d
 ```
 
-The app runs as user `1000` in the container; if it can't read the key file, run `sudo chown 1000 secrets/dbkey`.
+Open **http://localhost:8080** on the same computer, or **http://&lt;the computer's IP&gt;:8080** on phones in the same Wi-Fi (for example `http://192.168.1.20:8080`). The first person to sign up gets their own group and can invite everyone else from the group menu.
 
-The app listens on `127.0.0.1:8080`. Point your proxy at it, for example with Caddy:
-
-```
-shoplist.example.org {
-	reverse_proxy 127.0.0.1:8080
-}
-```
-
-The first account can always be created; it gets its own group and can invite others from the group menu.
+To update later: `git pull && docker compose up -d --build`.
 
 ## Settings
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `REGISTRATION` | `open` | `open`: anyone can sign up. `invite`: only with an invite link (the first account always works). |
-| `DB_KEY_FILE` | – | File with 64 hex characters; the database is encrypted with it (AES-256-GCM). Without it, the database is a plain JSON file. |
-| `COOKIE_SECURE` | `1` | `0` only for testing over plain http. |
 | `TRUST_PROXY` | `private` | Whose `X-Real-IP` / `X-Forwarded-For` is believed for the rate limits: `private` = proxies in private networks (Docker), anything else = only `127.0.0.1`. |
 | `PORT` | `8080` | Port inside the container. |
 
@@ -54,9 +42,13 @@ docker compose start shoplist
 
 It prints a new password and signs that account out on all devices; the user can change it under Settings.
 
+## Home screen app and offline mode
+
+Phones only offer "Add to Home Screen" as a real app, and only keep working offline, when the site is opened over **https**. Over plain `http://…:8080` everything else works normally. If you want the app version, put a reverse proxy with HTTPS in front, for example [Caddy](https://caddyserver.com/) with `reverse_proxy 127.0.0.1:8080`.
+
 ## Data and backups
 
-Everything is in one file, `db.json`, in the `shoplist-data` volume. Back up that file **and** `secrets/dbkey` – without the key the backup can't be read.
+Everything is in one file, `db.json`, in the `shoplist-data` volume. To back it up:
 
 ```sh
 docker compose cp shoplist:/data/db.json ./db.json.bak

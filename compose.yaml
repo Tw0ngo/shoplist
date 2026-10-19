@@ -1,24 +1,16 @@
-# Shoplist behind your reverse proxy (Caddy, nginx, Traefik …) with HTTPS.
-# Before the first start: mkdir -p secrets && openssl rand -hex 32 > secrets/dbkey
+# Shoplist: `docker compose up -d`, then open http://<this computer's IP>:8080
 services:
   shoplist:
     build: .
     image: shoplist:latest
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8080:8080"        # only the reverse proxy on this machine talks to it
+      - "8080:8080"
     environment:
       REGISTRATION: open              # open: anyone can sign up; invite: only with an invite link (the first account always works)
-      DB_KEY_FILE: /run/secrets/dbkey # encrypts the database at rest; leave out for a plain file
-      # COOKIE_SECURE: "0"            # only for plain http (testing); browsers drop secure cookies without https
     volumes:
       - shoplist-data:/data
       # - ./branding:/branding:ro     # optional: hero.png for the header, own icons
-    secrets: [dbkey]
 
 volumes:
   shoplist-data:
-
-secrets:
-  dbkey:
-    file: ./secrets/dbkey
