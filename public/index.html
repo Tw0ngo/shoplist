@@ -1,0 +1,888 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#e2551f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Shoplist">
+<title>Shoplist</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="icon-180.png" sizes="180x180">
+<link rel="stylesheet" href="fonts.css">
+<link rel="stylesheet" href="style.css">
+<script src="i18n.js"></script>
+<script src="pwrules.js"></script>
+</head>
+<body>
+<div class="app">
+  <header class="hero">
+    <img src="hero.png" alt="" width="500" height="500">
+    <button class="edit" id="listMenu" type="button" data-t="btn.editList"></button>
+    <div class="tools">
+      <button class="edit" id="groupMenu" type="button"></button>
+      <button class="edit" id="settingsMenu" type="button" data-t-aria="btn.settings"></button>
+    </div>
+    <div class="txt">
+      <div class="kind" id="kind"></div>
+      <h1 id="title">—</h1>
+      <div class="sub" id="sub"></div>
+    </div>
+  </header>
+
+  <aside class="tip" id="tip" hidden>
+    <p data-t="tips.banner"></p>
+    <div class="tipbtns">
+      <button class="btn green" id="tipOpen" type="button" data-t="tips.open"></button>
+      <button class="btn" id="tipHide" type="button" data-t="tips.hide"></button>
+    </div>
+  </aside>
+
+  <nav class="scope" role="tablist" id="scope">
+    <button type="button" role="tab" data-scope="shared" data-t="scope.shared"></button>
+    <button type="button" role="tab" data-scope="private"></button>
+  </nav>
+  <nav class="tabs" role="tablist" id="tabs"></nav>
+
+  <form class="addrow" id="addForm" autocomplete="off">
+    <input id="newItem" maxlength="200" enterkeyhint="send" list="suggest" data-t-aria="add.aria">
+    <datalist id="suggest"></datalist>
+    <div class="prio" id="newPrio" role="group"></div>
+    <button class="add" type="submit" data-t-aria="add.button">+</button>
+  </form>
+
+  <div class="transfer" id="transferBar" hidden>
+    <span class="grow" id="transferHint"></span>
+    <select id="target" data-t-aria="transfer.target"></select>
+    <button class="btn green" id="transfer" type="button" data-t="transfer.button"></button>
+  </div>
+
+  <div class="bar" id="chips" hidden></div>
+
+  <ul class="list" id="list"></ul>
+
+  <footer class="foot">
+    <span class="status"><span class="dot" id="conn"></span><span id="status" data-t="status.connecting"></span></span>
+    <button class="btn ghost" id="clearDone" type="button" data-t="clearDone"></button>
+  </footer>
+</div>
+
+<div class="toast hide" id="toast" role="status" aria-live="polite"></div>
+<div class="modal" id="modal" hidden></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+
+// most important first
+const LEVELS = ['red', 'yellow', 'green'];
+const ORDER = Object.fromEntries(LEVELS.map((c, i) => [c, i]));
+const lname = c => t('level.' + c);
+
+// pixel icons in the Win95 look: [width, height, path on a pixel grid]
+const ICONS = {
+  lock: [8, 8, 'M2 0h4v1H2zM1 1h1v2H1zM6 1h1v2H6zM0 3h8v5H0zM3 4h2v2H3z'],
+  people: [11, 7, 'M2 0h2v2H2zM1 3h4v1H1zM0 4h6v3H0zM7 0h2v2H7zM6 3h4v1H6zM6 4h5v3H6z'],
+  person: [6, 7, 'M2 0h2v2H2zM1 3h4v1H1zM0 4h6v3H0z'],
+  gear: [9, 9, 'M3 0h3v1H3zM3 8h3v1H3zM0 3h1v3H0zM8 3h1v3H8zM1 1h1v1H1zM7 1h1v1H7zM1 7h1v1H1zM7 7h1v1H7zM2 1h5v1H2zM1 2h7v5H1zM2 7h5v1H2zM3 3h3v3H3z'],
+};
+function icon(name) {
+  const [w, h, d] = ICONS[name], ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg'), path = document.createElementNS(ns, 'path');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('class', 'ico');
+  svg.setAttribute('aria-hidden', 'true');
+  path.setAttribute('d', d);
+  path.setAttribute('fill-rule', 'evenodd');
+  svg.append(path);
+  return svg;
+}
+const withLock = (on, text) => on ? [icon('lock'), ' ' + text] : [text];
+
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+
+let db = { version: '', group: null, lists: [] };
+let me = null;
+// the open group; its shared lists show next to the user's private ones
+let groupId = store.get('shop.group');
+// private lists only reach their owner; the switch shows shared or private ones
+let scope = store.get('shop.scope') === 'private' ? 'private' : 'shared';
+let active = store.get('shop.active');
+let filter = null;
+let newPrio = null;
+let lastActive = null;
+const seen = new Set();
+
+const isPrivate = l => !!l.private;
+const curGroup = () => me?.groups.find(g => g.id === db.group);
+const inScope = () => db.lists.filter(l => isPrivate(l) === (scope === 'private'));
+const cur = () => inScope().find(l => l.id === active) || inScope()[0];
+const isStaples = l => l && l.kind === 'staples';
+const defaultPrio = l => isStaples(l) ? 'green' : 'yellow';
+
+let toastTimer;
+function toast(text) {
+  const tt = $('#toast');
+  tt.textContent = text;
+  tt.classList.remove('hide');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => tt.classList.add('hide'), 2200);
+}
+
+/* ---------------- API ---------------- */
+async function api(method, url, body) {
+  try { const d = await request(method, url, body); setConn(true); return d; }
+  catch (e) { setConn(!!e.status); throw e; }
+}
+let online = true;
+function setConn(ok) {
+  $('#conn').classList.toggle('off', !ok);
+  if (ok !== online) { online = ok; if (me) render(); }
+}
+
+/* ---------------- offline ---------------- */
+// without a connection, ticking off, adding and editing items still works: the change shows at once,
+// waits in localStorage and is sent once the server is reachable again. The last state is kept for opening the app offline.
+const load = k => { try { return JSON.parse(store.get(k) || 'null'); } catch { return null; } };
+let queue = load('shop.queue') || [];
+const saveQueue = () => store.set('shop.queue', JSON.stringify(queue));
+const OFFLINE_OK = [/^PATCH \/api\/items\//, /^DELETE \/api\/items\//, /^POST \/api\/lists\/[^/]+\/items$/, /^DELETE \/api\/lists\/[^/]+\/done$/];
+const offlineOk = (method, url) => OFFLINE_OK.some(re => re.test(method + ' ' + url));
+
+// the same change the server will make, on the local copy
+function applyLocal(op) {
+  const [, , kind, id, sub] = op.url.split('/');
+  const item = () => { for (const l of db.lists) { const i = l.items.find(x => x.id === id); if (i) return [l, i]; } return []; };
+  if (kind === 'items') {
+    const [l, it] = item();
+    if (!it) return 0;
+    if (op.method === 'DELETE') l.items = l.items.filter(x => x !== it);
+    else for (const k of ['done', 'color', 'name']) if (op.body[k] !== undefined) it[k] = op.body[k];
+    return 1;
+  }
+  const l = db.lists.find(x => x.id === id);
+  if (!l) return 0;
+  if (sub === 'done') { l.items = l.items.filter(i => !i.done); return 1; }
+  const key = op.body.name.toLowerCase();
+  if (l.items.some(i => !i.done && i.name.toLowerCase() === key)) return 0;
+  const old = l.items.find(i => i.done && i.name.toLowerCase() === key);
+  if (old) Object.assign(old, { done: false, color: op.body.color });
+  else l.items.push({ id: op.tmp, name: op.body.name, color: op.body.color, done: false, created: op.at });
+  return 1;
+}
+
+function queueOp(method, url, body = {}) {
+  const op = { method, url, body, at: Date.now(), tmp: 'tmp-' + Math.random().toString(36).slice(2) };
+  const changed = applyLocal(op);
+  if (changed) { queue.push(op); saveQueue(); }
+  render();
+  return { added: changed, offline: true };
+}
+
+// sends the waiting changes in order; items added offline get their real id from the next state
+let flushing = null;
+function flush() {
+  return flushing ||= (async () => {
+    const ids = {};
+    let sent = 0;
+    try {
+      while (queue.length) {
+        const op = queue[0];
+        const url = op.url.replace(/tmp-[a-z0-9]+/, m => ids[m] || m);
+        if (url.includes('tmp-')) { queue.shift(); saveQueue(); continue; }
+        try { await request(op.method, url, op.body); }
+        catch (e) { if (!e.status) throw e; if (e.status === 401) { oops(e); throw e; } }
+        // a change the server refuses (item gone meanwhile) is dropped
+        queue.shift(); saveQueue(); sent++;
+        if (op.url.endsWith('/items') && queue.some(q => q.url.includes(op.tmp))) {
+          const st = await request('GET', '/api/state?g=' + encodeURIComponent(groupId || ''));
+          const l = st.lists?.find(x => x.id === op.url.split('/')[3]);
+          const it = l?.items.find(i => !i.done && i.name.toLowerCase() === op.body.name.toLowerCase());
+          if (it) ids[op.tmp] = it.id;
+        }
+      }
+      setConn(true);
+    } catch { setConn(false); }
+    flushing = null;
+    if (sent) { db.version = ''; await refresh(); if (!queue.length) toast(t('status.synced')); }
+  })();
+}
+addEventListener('online', () => queue.length ? flush() : poll());
+// session gone -> login page; anything else -> toast
+function oops(e) {
+  if (e.status === 401) return loggedOut();
+  toast(e.message);
+}
+function apply(state) {
+  if (!state || state.unchanged) return;
+  db = { version: state.version, group: state.group, lists: state.lists };
+  store.set('shop.cache', JSON.stringify({ me, db }));
+  // changes still waiting stay visible on top of the server's state
+  for (const op of queue) applyLocal(op);
+  // the server falls back to another group when this one is gone (left, removed)
+  if (state.group !== groupId) { groupId = state.group; store.set('shop.group', groupId || ''); }
+  // names and members may have changed as well
+  if (me) api('GET', '/api/me').then(m => { me = m; render(); }).catch(() => {});
+  // the open list was made private or shared: follow it to the other group
+  const a = db.lists.find(l => l.id === active);
+  if (a && isPrivate(a) !== (scope === 'private')) setScope(isPrivate(a) ? 'private' : 'shared', a.id);
+  else render();
+}
+// a change, then the new state; item changes wait for the connection when offline
+async function act(method, url, body) {
+  if (queue.length) await flush();
+  if (!queue.length) {
+    try { const s = await api(method, url, body); await refresh(); return s; }
+    catch (e) { if (e.status || !offlineOk(method, url)) { oops(e); return null; } }
+  } else if (!offlineOk(method, url)) { toast(t('offline.needsNet')); return null; }
+  return queueOp(method, url, body);
+}
+
+function setScope(s, list = null) {
+  scope = s;
+  store.set('shop.scope', s);
+  active = list;
+  filter = null;
+  newPrio = null;
+  render();
+}
+for (const b of document.querySelectorAll('#scope button')) b.onclick = () => b.dataset.scope !== scope && setScope(b.dataset.scope);
+
+/* ---------------- render ---------------- */
+function prioPicker(value, onPick, label) {
+  const g = el('div', { className: 'prio', role: 'group' });
+  g.setAttribute('aria-label', label);
+  for (const key of [...LEVELS].reverse()) {
+    const b = el('button', { className: 'c-' + key, type: 'button', title: lname(key) }, el('i'));
+    b.setAttribute('aria-label', lname(key));
+    b.setAttribute('aria-pressed', key === value);
+    b.onclick = () => onPick(key);
+    g.append(b);
+  }
+  return g;
+}
+
+// fixed texts and the shared/private switch
+function renderStatic() {
+  translatePage();
+  $('#scope [data-scope=private]').replaceChildren(...withLock(true, t('scope.private')));
+  $('#groupMenu').replaceChildren(icon('people'), ' ' + (curGroup()?.name || t('btn.group')));
+  $('#settingsMenu').replaceChildren(icon('gear'));
+  $('#groupMenu').title = t('btn.group');
+  for (const b of document.querySelectorAll('#scope button')) b.setAttribute('aria-selected', b.dataset.scope === scope);
+}
+
+function render() {
+  renderStatic();
+  const l = cur();
+  const lists = inScope();
+
+  // tabs
+  const tabs = $('#tabs');
+  tabs.replaceChildren(...lists.map(x => {
+    const n = isStaples(x) ? x.items.filter(i => i.color === 'red').length : x.items.filter(i => !i.done).length;
+    const b = el('button', { className: 'tab', role: 'tab', type: 'button' },
+      el('span', { textContent: x.name }), n ? el('span', { className: 'n', textContent: isStaples(x) ? t('tab.red', { n }) : n }) : '');
+    b.setAttribute('aria-selected', !!l && x.id === l.id);
+    b.onclick = () => { if (active !== x.id) { active = x.id; filter = null; newPrio = defaultPrio(x); render(); } };
+    return b;
+  }), Object.assign(el('button', { className: 'tab new', type: 'button', textContent: t('tab.new') }), { onclick: () => newList() }));
+
+  const openCount = db.lists.filter(x => !isStaples(x)).reduce((s, x) => s + x.items.filter(i => !i.done).length, 0);
+  document.title = (openCount ? `(${openCount}) ` : '') + t('app.name');
+
+  for (const id of ['#addForm', '#listMenu', '#clearDone']) $(id).hidden = !l;
+  if (!l) return renderNoList();
+
+  const switched = lastActive !== l.id;
+  active = lastActive = l.id;
+  store.set('shop.active', active);
+  const st = isStaples(l);
+  if (!newPrio) newPrio = defaultPrio(l);
+  if (switched) tabs.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+  // header
+  const done = l.items.filter(i => i.done).length;
+  const count = c => l.items.filter(i => i.color === c && !(i.done && !st)).length;
+  $('#kind').replaceChildren(...withLock(isPrivate(l), t(st ? 'kind.staples' : 'kind.list')));
+  $('#title').textContent = l.name;
+  fitTitle();
+  $('#sub').textContent = st
+    ? t('sub.staples', { red: count('red'), yellow: count('yellow'), green: count('green') })
+    : t('sub.list', { open: l.items.length - done, done });
+  $('#newItem').placeholder = t(st ? 'add.placeholderStaples' : 'add.placeholder');
+
+  $('#newPrio').replaceWith(Object.assign(prioPicker(newPrio, k => { newPrio = k; render(); $('#newItem').focus(); }, t('add.prio')), { id: 'newPrio' }));
+
+  // staples -> shopping list (shared and private ones)
+  const targets = db.lists.filter(x => !isStaples(x));
+  const needed = l.items.filter(i => i.color !== 'green').length;
+  $('#transferBar').hidden = !st;
+  if (st) {
+    const tsel = $('#target');
+    const prev = tsel.value || store.get('shop.target');
+    tsel.replaceChildren(...targets.map(x => el('option', { value: x.id, textContent: '→ ' + x.name + (isPrivate(x) ? ` (${t('scope.private')})` : '') })));
+    if (targets.some(x => x.id === prev)) tsel.value = prev;
+    tsel.hidden = !targets.length;
+    $('#transfer').hidden = !targets.length;
+    $('#transfer').disabled = !needed;
+    $('#transferHint').textContent = !targets.length ? t('transfer.noTarget') : needed ? t('transfer.hint', { n: needed }) : t('transfer.allGreen');
+  }
+
+  // filter chips
+  const counts = Object.fromEntries(LEVELS.map(k => [k, count(k)]));
+  if (filter && !counts[filter]) filter = null;
+  const chips = $('#chips');
+  const used = LEVELS.filter(k => counts[k]);
+  chips.hidden = used.length < 2 && !filter;
+  chips.replaceChildren(...used.map(key => {
+    const b = el('button', { className: 'chip c-' + key, type: 'button' }, el('i'), `${lname(key)} ${counts[key]}`);
+    b.setAttribute('aria-pressed', filter === key);
+    b.onclick = () => { filter = filter === key ? null : key; render(); };
+    return b;
+  }));
+
+  // items: open first, then by priority, then age (staples: by priority, then name)
+  const items = l.items
+    .filter(i => !filter || i.color === filter)
+    .sort((a, b) => st
+      ? (ORDER[a.color] - ORDER[b.color]) || a.name.localeCompare(b.name, lang)
+      : (a.done - b.done) || (ORDER[a.color] - ORDER[b.color]) || (a.created - b.created));
+  const rows = [];
+  if (!items.length) {
+    rows.push(el('li', { className: 'empty' }, el('b', { textContent: t(filter ? 'empty.filter' : 'empty.title') }),
+      t(filter ? 'empty.filterText' : st ? 'empty.staples' : 'empty.list')));
+  }
+  let group = null, sawDone = false;
+  for (const it of items) {
+    if (st && it.color !== group) {
+      group = it.color;
+      rows.push(el('li', { className: 'group c-' + group }, el('i'), lname(group)));
+    }
+    if (!st && it.done && !sawDone && items.some(i => !i.done)) {
+      sawDone = true;
+      rows.push(el('li', { className: 'group', textContent: t('group.done') }));
+    }
+    rows.push(itemRow(it, st));
+  }
+  $('#list').replaceChildren(...rows);
+  for (const x of db.lists) for (const i of x.items) seen.add(i.id);
+
+  // footer
+  $('#clearDone').hidden = st || !done;
+  showStatus(l.items.length);
+
+  // suggestions: everything ever added, minus what's already open here
+  const openHere = new Set(l.items.filter(i => !i.done).map(i => i.name.toLowerCase()));
+  const names = new Map();
+  for (const x of [...db.lists].sort((a, b) => isStaples(b) - isStaples(a)))
+    for (const i of x.items) if (!openHere.has(i.name.toLowerCase()) && !names.has(i.name.toLowerCase())) names.set(i.name.toLowerCase(), i.name);
+  $('#suggest').replaceChildren(...[...names.values()].slice(0, 200).map(n => el('option', { value: n })));
+}
+
+// this group has no lists (yet)
+function renderNoList() {
+  const p = scope === 'private', g = curGroup();
+  $('#kind').replaceChildren(...withLock(p, t(p ? 'scope.private' : 'scope.shared').toUpperCase()));
+  $('#title').textContent = p ? t('private.title') : g ? g.name : t('scope.shared');
+  fitTitle();
+  $('#sub').textContent = '';
+  $('#transferBar').hidden = $('#chips').hidden = true;
+  const [head, text, label, onclick] = p ? ['private.none', t('private.text'), 'private.create', () => newList()]
+    : g ? ['shared.none', t('shared.text', { group: g.name }), 'shared.create', () => newList()]
+    : ['shared.noGroup', t('shared.noGroupText'), 'grp.new', () => newGroup()];
+  $('#list').replaceChildren(el('li', { className: 'empty' }, el('b', { textContent: t(head) }), text, el('br'),
+    Object.assign(el('button', { className: 'btn', type: 'button', textContent: t(label) }), { onclick })));
+  showStatus(0);
+}
+
+// long names get a smaller title, very long ones a second line, instead of being cut off
+function fitTitle() {
+  const h = $('#title');
+  h.style.fontSize = '';
+  h.classList.remove('wrap');
+  for (let size = parseFloat(getComputedStyle(h).fontSize); h.scrollWidth > h.clientWidth && size > 22; ) h.style.fontSize = (size -= 2) + 'px';
+  if (h.scrollWidth > h.clientWidth) h.classList.add('wrap');
+}
+addEventListener('resize', fitTitle);
+
+// item count, or what is waiting while offline
+function showStatus(n) {
+  const off = !online || queue.length;
+  $('#status').textContent = queue.length ? t('status.pending', { n: queue.length }) : !online ? t('status.offline')
+    : n === 1 ? t('status.item') : t('status.items', { n });
+  $('#status').parentNode.classList.toggle('offline', !!off);
+}
+
+function itemRow(it, st) {
+  const li = el('li', { className: `item c-${it.color}` + (it.done ? ' done' : '') + (seen.size && !seen.has(it.id) ? ' new' : '') });
+  if (!st) {
+    const cb = el('input', { type: 'checkbox', className: 'chk', checked: it.done });
+    cb.setAttribute('aria-label', t('item.check', { name: it.name }));
+    cb.onchange = () => toggle(it, cb.checked);
+    li.append(cb);
+  }
+  const name = el('span', { className: 'name', textContent: it.name });
+  name.onclick = () => st ? itemSheet(it) : toggle(it, !it.done);
+  const more = el('button', { className: 'more', type: 'button', textContent: '⋯' });
+  more.setAttribute('aria-label', t('item.edit', { name: it.name }));
+  more.onclick = () => itemSheet(it);
+  li.append(name, prioPicker(it.color, k => setPrio(it, k), t('item.prio', { name: it.name })), more);
+  return li;
+}
+
+/* ---------------- actions ---------------- */
+async function setPrio(it, color) {
+  if (color === it.color) return;
+  await act('PATCH', '/api/items/' + it.id, { color });
+}
+
+async function toggle(it, done) {
+  await act('PATCH', '/api/items/' + it.id, { done });
+}
+
+async function remove(it) {
+  if (await act('DELETE', '/api/items/' + it.id)) toast(t('item.deleted', { name: it.name }));
+}
+
+$('#addForm').onsubmit = async e => {
+  e.preventDefault();
+  const input = $('#newItem');
+  const name = input.value.trim();
+  if (!name || !cur()) { input.focus(); return; }
+  input.value = '';
+  const s = await act('POST', `/api/lists/${cur().id}/items`, { name, color: newPrio });
+  if (!s) input.value = name;
+  else if (!s.added) toast(t('item.exists', { name }));
+  input.focus();
+};
+
+$('#clearDone').onclick = async () => {
+  const n = cur().items.filter(i => i.done).length;
+  if (await act('DELETE', `/api/lists/${cur().id}/done`)) toast(t('clearDone.toast', { n }));
+};
+
+$('#target').onchange = e => store.set('shop.target', e.target.value);
+$('#transfer').onclick = async () => {
+  const l = cur(), to = $('#target').value;
+  const tl = db.lists.find(x => x.id === to);
+  if (!tl) return;
+  const s = await act('POST', `/api/lists/${l.id}/transfer`, { to });
+  if (s) toast(s.added ? t('transfer.done', { n: s.added, list: tl.name }) : t('transfer.nothing', { list: tl.name }));
+};
+
+/* ---------------- sheets ---------------- */
+// body: elements, or a function getting close() for buttons inside the sheet
+function sheet(title, body, buttons) {
+  return new Promise(resolve => {
+    const modal = $('#modal');
+    const close = v => { modal.hidden = true; modal.replaceChildren(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') close(null); };
+    if (typeof body === 'function') body = body(close);
+    const form = el('form', { className: 'sheet' }, el('h2', { textContent: title }));
+    form.setAttribute('role', 'dialog');
+    form.setAttribute('aria-modal', 'true');
+    form.setAttribute('aria-label', title);
+    form.append(...body.filter(Boolean), el('div', { className: 'btns' }, ...buttons.map(b => {
+      const btn = el('button', { className: 'btn ' + (b.cls || (b.primary ? '' : 'ghost')) + (b.left ? ' left' : ''), type: b.primary ? 'submit' : 'button', textContent: b.label });
+      if (!b.primary) btn.onclick = () => close(b.value === undefined ? null : { value: b.value, form });
+      return btn;
+    })));
+    form.onsubmit = e => { e.preventDefault(); close({ value: buttons.find(b => b.primary)?.value ?? 'ok', form }); };
+    modal.replaceChildren(form);
+    modal.hidden = false;
+    modal.onclick = e => { if (e.target === modal) close(null); };
+    document.addEventListener('keydown', onKey);
+    // don't pop the keyboard open on phones
+    const focus = form.querySelector('input:not([type=radio]):not([type=checkbox]):not([hidden])');
+    if (focus && !matchMedia('(pointer: coarse)').matches) setTimeout(() => focus.select(), 30);
+  });
+}
+const field = (label, value, name, attrs = {}) => el('label', { className: 'field' }, el('span', { textContent: label }),
+  el('input', { name, value: value || '', maxLength: 200, autocomplete: 'off', ...attrs }));
+const pwField = (label, name, autocomplete) => field(label, '', name, { type: 'password', autocomplete });
+const check = (label, name, checked, hint = '', disabled = false) => el('label', { className: 'check' },
+  el('input', { type: 'checkbox', name, checked, disabled }), el('span', {}, label, hint ? el('small', { textContent: hint }) : ''));
+const para = (text, className = '') => text && el('p', { className, textContent: text });
+const val = (r, name) => r.form.elements.namedItem(name).value;
+const checked = (r, name) => r.form.elements.namedItem(name).checked;
+const btn = (label, onclick, cls = '') => Object.assign(el('button', { className: 'btn ' + cls, type: 'button', textContent: label }), { onclick });
+const cancelSave = () => [{ label: t('btn.cancel') }, { label: t('btn.save'), primary: true }];
+
+async function newList() {
+  const kinds = [['list', t('newList.list'), t('newList.listText')], ['staples', t('newList.staples'), t('newList.staplesText')]]
+    .map(([v, title, d], i) => el('label', { className: 'radio' }, el('input', { type: 'radio', name: 'kind', value: v, checked: !i }), el('span', {}, title, el('small', { textContent: d }))));
+  const r = await sheet(t('newList.title'), [field(t('newList.name'), '', 'name', { maxLength: 40 }), ...kinds,
+    // without a group, lists can only be private
+    check(t('newList.private'), 'private', scope === 'private' || !db.group, '', !db.group)], [
+    { label: t('btn.cancel') }, { label: t('btn.create'), primary: true }]);
+  if (!r) return;
+  const name = val(r, 'name').trim();
+  if (!name) return;
+  const kind = val(r, 'kind');
+  const priv = checked(r, 'private') || !db.group;
+  const s = await act('POST', '/api/lists', { name, kind, private: priv, group: db.group });
+  if (s) setScope(priv ? 'private' : 'shared', s.id);
+}
+
+async function listMenu() {
+  const l = cur();
+  if (!l) return;
+  const canDelete = db.lists.length > 1;
+  // shared -> private only for lists you made yourself; private -> shared always
+  const canPrivate = (isPrivate(l) && !!db.group) || (!isPrivate(l) && l.by === me?.user.id);
+  const r = await sheet(t('btn.editList'), [field(t('newList.name'), l.name, 'name', { maxLength: 40 }),
+    check(t('editList.private'), 'private', isPrivate(l), canPrivate ? '' : t('editList.privateHint'), !canPrivate),
+  ], [...(canDelete ? [{ label: t('btn.delete'), value: 'delete', left: true, cls: 'danger' }] : []), ...cancelSave()]);
+  if (!r) return;
+  if (r.value === 'delete') return deleteList();
+  const patch = {};
+  const name = val(r, 'name').trim();
+  if (name && name !== l.name) patch.name = name;
+  if (canPrivate && checked(r, 'private') !== isPrivate(l)) Object.assign(patch, { private: checked(r, 'private'), group: db.group });
+  if (!Object.keys(patch).length) return;
+  if (await act('PATCH', '/api/lists/' + l.id, patch) && 'private' in patch)
+    toast(t(patch.private ? 'editList.nowPrivate' : 'editList.nowShared', { name: name || l.name, group: curGroup()?.name }));
+}
+
+async function deleteList() {
+  const l = cur();
+  const r = await sheet(t('deleteList.title'), [para(t('deleteList.text', { name: l.name, n: l.items.length }))], [
+    { label: t('btn.cancel') }, { label: t('btn.delete'), primary: true, cls: 'danger' }]);
+  if (r && await act('DELETE', '/api/lists/' + l.id)) toast(t('item.deleted', { name: l.name }));
+}
+
+async function itemSheet(it) {
+  let chosen = it.color;
+  const levels = el('div', { className: 'levels' }, ...LEVELS.map(key => {
+    const b = el('button', { className: 'level c-' + key, type: 'button' }, el('i'), lname(key));
+    b.setAttribute('aria-pressed', key === chosen);
+    b.onclick = () => { chosen = key; levels.querySelectorAll('.level').forEach(x => x.setAttribute('aria-pressed', x === b)); };
+    return b;
+  }));
+  const r = await sheet(it.name, [levels, field(t('newList.name'), it.name, 'name')], [
+    { label: t('btn.delete'), value: 'delete', left: true, cls: 'danger' }, ...cancelSave()]);
+  if (!r) return;
+  if (r.value === 'delete') return remove(it);
+  const patch = {};
+  const name = val(r, 'name').trim();
+  if (name && name !== it.name) patch.name = name;
+  if (chosen !== it.color) patch.color = chosen;
+  if (Object.keys(patch).length) await act('PATCH', '/api/items/' + it.id, patch);
+}
+
+$('#listMenu').onclick = listMenu;
+$('#groupMenu').onclick = () => groupSheet();
+$('#settingsMenu').onclick = settingsSheet;
+
+/* ---------------- login & invites ---------------- */
+// signing in happens on /login; invite links keep their code in the hash
+function loggedOut(code) {
+  me = null;
+  // nothing of this account stays on the device
+  store.set('shop.cache', '');
+  store.set('shop.queue', '');
+  location.replace('/login' + (code ? '#join=' + encodeURIComponent(code) : ''));
+}
+
+// an invite opened while signed in: join one more group
+async function join(code) {
+  try { me = await api('GET', '/api/me'); }
+  catch (e) { return e.status === 401 ? loggedOut(code) : oops(e); }
+  let inv;
+  try { inv = await api('GET', '/api/invite/' + encodeURIComponent(code)); }
+  catch (e) { toast(e.message); return refresh(); }
+  if (me.groups.some(g => g.id === inv.groupId)) { toast(t('join.already', { group: inv.group })); return switchGroup(inv.groupId); }
+  const r = await sheet(t('join.title'), [para(t('join.text', { by: inv.by || t('register.someone'), group: inv.group }))],
+    [{ label: t('btn.cancel') }, { label: t('join.button'), primary: true }]);
+  if (!r) return refresh();
+  try {
+    me = await api('POST', '/api/join', { code });
+    await switchGroup(me.group);
+    toast(t('join.welcome', { group: inv.group }));
+  } catch (e) { oops(e); refresh(); }
+}
+
+/* ---------------- groups ---------------- */
+async function switchGroup(id) {
+  groupId = id;
+  store.set('shop.group', id || '');
+  db.version = '';
+  active = null;
+  filter = newPrio = null;
+  if (scope !== 'shared') { scope = 'shared'; store.set('shop.scope', scope); }
+  await refresh();
+}
+
+async function groupSheet() {
+  try { me = await api('GET', '/api/me'); } catch (e) { return oops(e); }
+  const g = curGroup(), admin = !!g?.admins.includes(me.user.id);
+  const date = ts => new Date(ts).toLocaleDateString(lang === 'de' ? 'de-DE' : 'en-GB', { day: 'numeric', month: 'short' });
+  const r = await sheet(g ? g.name : t('grp.title'), close => [
+    ...(g ? [
+      field(t('grp.name'), g.name, 'name', { maxLength: 40 }),
+      el('ul', { className: 'members' }, ...g.members.map(m => {
+        const self = m.id === me.user.id, isAdm = g.admins.includes(m.id);
+        return el('li', {},
+          el('span', { textContent: m.name + (self ? t('grp.you') : '') + (isAdm ? t('grp.admin') : '') }),
+          // admins hand out or take back admin rights; there is always at least one left
+          admin && !isAdm ? btn(t('grp.makeAdmin'), () => close({ value: 'admin', member: m })) : '',
+          admin && isAdm && g.admins.length > 1 ? btn(t(self ? 'grp.dropAdmin' : 'grp.unAdmin'), () => close({ value: 'unadmin', member: m })) : '',
+          admin && !self ? btn(t('grp.remove'), () => close({ value: 'remove', member: m }), 'danger') : '',
+        );
+      }), ...g.invites.map(i => el('li', {},
+        el('span', { className: 'muted', textContent: t('grp.inviteRow', { by: i.by || '?', date: date(i.expires) }) }),
+        btn(t('grp.revoke'), () => close({ value: 'revoke', invite: i })),
+      ))),
+      el('div', { className: 'stack' },
+        btn(t('grp.invite'), () => close({ value: 'invite' }), 'green'),
+        btn(t('grp.leave'), () => close({ value: 'leave' }), 'danger'),
+      ),
+    ] : [para(t('shared.noGroupText'))]),
+    me.groups.length > 1 ? el('h3', { textContent: t('grp.mine') }) : '',
+    me.groups.length > 1 ? el('ul', { className: 'members' }, ...me.groups.map(x => el('li', { className: x === g ? 'cur' : '' },
+      el('span', {}, x.name + ' · ' + x.members.length + ' ', icon('person')),
+      x === g ? el('span', { className: 'muted', textContent: t('grp.current'), style: 'flex:none' }) : btn(t('grp.open'), () => close({ value: 'open', group: x })),
+    ))) : '',
+    el('div', { className: 'stack' }, btn(t('grp.new'), () => close({ value: 'new' }))),
+  ], g ? [{ label: t('btn.close') }, { label: t('btn.save'), primary: true }] : [{ label: t('btn.close') }]);
+  if (!r) return;
+  const path = g && '/api/groups/' + encodeURIComponent(g.id);
+  try {
+    if (r.value === 'ok' && g) {
+      const name = val(r, 'name').trim();
+      if (name && name !== g.name) { me = await api('PATCH', path, { name }); toast(t('grp.saved')); render(); }
+    }
+    if (r.value === 'open') { await switchGroup(r.group.id); return toast(t('grp.switched', { group: r.group.name })); }
+    if (r.value === 'new') return newGroup();
+    if (r.value === 'invite') return invite(g);
+    if (r.value === 'revoke') { me = await api('DELETE', path + '/invites/' + r.invite.id); toast(t('grp.revoked')); return groupSheet(); }
+    if (r.value === 'admin') { me = await api('POST', path + '/admins/' + r.member.id); toast(t('grp.madeAdmin', { name: r.member.name })); return groupSheet(); }
+    if (r.value === 'unadmin') { me = await api('DELETE', path + '/admins/' + r.member.id); toast(t('grp.notAdmin', { name: r.member.name })); return groupSheet(); }
+    if (r.value === 'remove') {
+      const ok = await sheet(t('grp.removeTitle'), [para(t('grp.removeText', { name: r.member.name, group: g.name }))],
+        [{ label: t('btn.cancel') }, { label: t('grp.remove'), primary: true, cls: 'danger' }]);
+      if (ok) { me = await api('DELETE', path + '/members/' + r.member.id); toast(t('grp.removed', { name: r.member.name })); }
+      return groupSheet();
+    }
+    if (r.value === 'leave') {
+      const hand = isLastAdmin(g);
+      const ok = await sheet(t('grp.leaveTitle'), [para(t('grp.leaveText', { group: g.name })),
+        g.members.length === 1 ? para(t('grp.leaveLast'), 'err') : '',
+        hand ? para(t('grp.handoverHint'), 'muted') : '', hand ? handover(g) : ''],
+        [{ label: t('btn.cancel') }, { label: t('grp.leaveButton'), primary: true, cls: 'danger' }]);
+      if (!ok) return;
+      const to = hand ? val(ok, 'to-' + g.id) : undefined;
+      me = await api('POST', path + '/leave', { to });
+      await switchGroup(me.groups[0]?.id);
+      toast(t(to === 'delete' ? 'grp.deleted' : 'grp.left', { group: g.name }));
+    }
+  } catch (e) { oops(e); }
+}
+
+// admin leaving a group with others in it: pick the new admin or delete the group
+function handover(g) {
+  const others = g.members.filter(m => m.id !== me.user.id);
+  return el('label', { className: 'field' }, el('span', { textContent: t('grp.handover', { group: g.name }) }),
+    el('select', { name: 'to-' + g.id }, ...others.map(m => el('option', { value: m.id, textContent: m.name })),
+      el('option', { value: 'delete', textContent: t('grp.deleteGroup') })));
+}
+// only the last admin of a group with other members has to choose
+const isLastAdmin = g => g.admins.length === 1 && g.admins[0] === me.user.id && g.members.length > 1;
+const handovers = () => me.groups.filter(isLastAdmin);
+
+async function newGroup() {
+  const r = await sheet(t('grp.newTitle'), [field(t('grp.name'), '', 'name', { maxLength: 40 }), para(t('grp.newHint'), 'muted')],
+    [{ label: t('btn.cancel') }, { label: t('btn.create'), primary: true }]);
+  const name = r && val(r, 'name').trim();
+  if (!name) return;
+  try {
+    me = await api('POST', '/api/groups', { name });
+    await switchGroup(me.group);
+    toast(t('grp.created', { group: name }));
+  } catch (e) { oops(e); }
+}
+
+async function invite(g) {
+  let r;
+  try { r = await api('POST', '/api/groups/' + encodeURIComponent(g.id) + '/invites'); } catch (e) { return oops(e); }
+  me = r;
+  await linkSheet(t('invite.title'), `${location.origin}/login#join=${r.code}`, t('invite.shareText', { group: g.name }),
+    [para(t('invite.text', { group: g.name }))]);
+}
+
+// a link to pass on: copy, or the phone's share menu
+function linkSheet(title, link, shareText, texts, buttons = []) {
+  const input = el('input', { value: link, readOnly: true, ariaLabel: t('invite.aria') });
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(link); }
+    catch { input.select(); document.execCommand('copy'); }
+    toast(t('invite.copied'));
+  };
+  return sheet(title, [
+    ...texts,
+    el('div', { className: 'linkrow' }, input, btn(t('invite.copy'), copy)),
+    navigator.share ? Object.assign(btn(t('invite.share'), () => navigator.share({ title: t('app.name'), text: shareText, url: link }).catch(() => {}), 'green'),
+      { style: 'width:100%;margin-bottom:14px' }) : '',
+  ], [...buttons, { label: t('btn.done'), primary: true }]);
+}
+
+/* ---------------- settings & account ---------------- */
+async function settingsSheet() {
+  if (!me) return;
+  const sel = el('select', { name: 'lang' }, ...Object.entries(LANGS).map(([k, n]) => el('option', { value: k, textContent: n, selected: k === lang })));
+  const r = await sheet(t('settings.title'), close => {
+    // a new language applies right away; the sheet reopens in it
+    sel.onchange = () => close({ value: 'lang' });
+    return [
+      el('label', { className: 'field' }, el('span', { textContent: t('settings.language') }), sel),
+      para(t('settings.account', { name: me.user.name }), 'muted'),
+      el('div', { className: 'stack' },
+        btn(t('settings.tips'), () => close({ value: 'tips' })),
+        btn(t('settings.password'), () => close({ value: 'password' })),
+        btn(t('settings.logout'), () => close({ value: 'logout' })),
+        btn(t('settings.delete'), () => close({ value: 'delete' }), 'danger'),
+      ),
+      // a plain download; GET needs no X-Shop header
+      el('p', {}, el('a', { href: '/api/export', download: 'shoplist-export.json', textContent: t('settings.export') })),
+    ];
+  }, [{ label: t('btn.close') }]);
+  if (!r) return;
+  try {
+    if (r.value === 'lang') {
+      setLang(sel.value);
+      render();
+      me = await api('PATCH', '/api/me', { lang });
+      return settingsSheet();
+    }
+    if (r.value === 'tips') return tipsSheet();
+    if (r.value === 'password') return changePassword();
+    if (r.value === 'delete') return deleteAccount();
+    if (r.value === 'logout') { await api('POST', '/api/logout'); loggedOut(); }
+  } catch (e) { oops(e); }
+}
+
+/* ---------------- tips: home screen ---------------- */
+const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// Chrome on Android offers its own install dialog; keep it for the button in the tips
+let installPrompt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; });
+addEventListener('appinstalled', () => { installPrompt = null; $('#tip').hidden = true; });
+
+function tipsSheet() {
+  const steps = (title, keys, note) => [el('h3', { className: 'platform', textContent: t(title) }),
+    el('ol', { className: 'steps' }, ...keys.map(k => el('li', { textContent: t(k, { host: location.host }) }))), note ? para(t(note), 'muted') : ''];
+  const ios = steps('tips.ios', ['tips.ios1', 'tips.ios2', 'tips.ios3', 'tips.ios4'], 'tips.iosNote');
+  const android = steps('tips.android', ['tips.android1', 'tips.android2', 'tips.android3', 'tips.android4']);
+  // this device's instructions first
+  return sheet(t('tips.title'), close => [
+    standalone() ? para(t('tips.installed'), 'err ok') : para(t('tips.intro')),
+    !standalone() && installPrompt ? el('div', { className: 'stack' }, btn(t('tips.installNow'), async () => {
+      installPrompt.prompt();
+      await installPrompt.userChoice.catch(() => {});
+      installPrompt = null;
+      close(null);
+    }, 'green')) : '',
+    ...(isIOS() ? [...ios, ...android] : [...android, ...ios]),
+    el('h3', { className: 'platform', textContent: t('tips.otherTitle') }), para(t('tips.other'), 'muted'),
+  ], [{ label: t('btn.close'), primary: true }]);
+}
+
+// shown after signing in until it is dismissed for good (per device: installing is per device too)
+function showTip() { $('#tip').hidden = standalone() || store.get('shop.tipHidden') === '1'; }
+$('#tipOpen').onclick = () => tipsSheet();
+$('#tipHide').onclick = () => { store.set('shop.tipHidden', '1'); $('#tip').hidden = true; };
+
+async function changePassword() {
+  let msg = null;
+  for (;;) {
+    const r = await sheet(t('pw.title'), [
+      para(msg, 'err'),
+      el('input', { type: 'text', name: 'username', value: me.user.name, autocomplete: 'username', hidden: true }),
+      pwField(t('pw.old'), 'old', 'current-password'),
+      ...(() => { const f = pwField(t('pw.new'), 'password', 'new-password');
+        return [f, pwChecklist(f.querySelector('input'), () => me.user.name)]; })(),
+      pwField(t('pw.again'), 'again', 'new-password'),
+    ], [{ label: t('btn.cancel') }, { label: t('pw.submit'), primary: true }]);
+    if (!r) return;
+    if (val(r, 'password') !== val(r, 'again')) { msg = t('err.pw_mismatch'); continue; }
+    try {
+      await api('POST', '/api/password', { old: val(r, 'old'), password: val(r, 'password') });
+      return toast(t('pw.changed'));
+    } catch (e) {
+      if (e.status === 401) return oops(e);
+      msg = e.message;
+    }
+  }
+}
+
+async function deleteAccount() {
+  let msg = null;
+  try { me = await api('GET', '/api/me'); } catch (e) { return oops(e); }
+  const owned = handovers();
+  for (;;) {
+    const r = await sheet(t('delete.title'), [
+      para(t('delete.text')), para(msg, 'err'),
+      owned.length ? para(t('grp.handoverHint'), 'muted') : '', ...owned.map(handover),
+      el('input', { type: 'text', name: 'username', value: me.user.name, autocomplete: 'username', hidden: true }),
+      pwField(t('delete.password'), 'password', 'current-password'),
+    ], [{ label: t('btn.cancel') }, { label: t('delete.submit'), primary: true, cls: 'danger' }]);
+    if (!r) return;
+    try {
+      await api('DELETE', '/api/me', { password: val(r, 'password'), groups: Object.fromEntries(owned.map(g => [g.id, val(r, 'to-' + g.id)])) });
+      store.set('shop.user', '');
+      return loggedOut();
+    } catch (e) {
+      if (e.status === 401) return oops(e);
+      msg = e.message;
+    }
+  }
+}
+
+/* ---------------- sync ---------------- */
+async function refresh() {
+  try { apply(await api('GET', '/api/state?g=' + encodeURIComponent(groupId || ''))); } catch (e) { oops(e); }
+}
+async function poll() {
+  if (!me) return;
+  if (queue.length) return flush();
+  try { apply(await api('GET', `/api/state?g=${encodeURIComponent(groupId || '')}&since=${encodeURIComponent(db.version)}`)); }
+  catch (e) { if (e.status === 401 || e.code === 'public_not_found') oops(e); }
+}
+async function start() {
+  try { me = await api('GET', '/api/me'); }
+  catch (e) {
+    // no connection: open the last state this device saw
+    const cache = !e.status && load('shop.cache');
+    if (!cache?.me) return oops(e);
+    ({ me, db } = cache);
+    groupId = db.group;
+    for (const op of queue) applyLocal(op);
+    return render();
+  }
+  showTip();
+  // this device has no language picked yet: use the account's
+  if (!langChosen() && me.user.lang && me.user.lang !== lang) setLang(me.user.lang);
+  await refresh();
+}
+renderStatic();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+(() => {
+  // /login sends signed-in users with an invite here as /#join=<code>
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (!hash.get('join')) return start();
+  history.replaceState(null, '', location.pathname);
+  join(hash.get('join'));
+})();
+setInterval(() => document.visibilityState === 'visible' && $('#modal').hidden && poll(), 4000);
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && poll());
+</script>
+</body>
+</html>

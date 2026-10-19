@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e2551f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Shoplist">
+<title>Shoplist</title>
+<meta name="description" content="Shopping list management">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="icon-180.png" sizes="180x180">
+<link rel="stylesheet" href="fonts.css">
+<link rel="stylesheet" href="style.css">
+<script src="i18n.js"></script>
+<script src="pwrules.js"></script>
+</head>
+<body>
+<div class="app">
+  <header class="hero">
+    <img src="hero.png" alt="" width="500" height="500">
+    <div class="txt"><h1>Shoplist</h1><div class="sub" data-t="login.tagline"></div></div>
+  </header>
+
+  <form class="sheet panel" id="login" method="post" action="/login" hidden>
+    <h2 data-t="login.title"></h2>
+    <p class="err" id="loginErr" hidden></p>
+    <label class="field"><span data-t="login.name"></span>
+      <input name="username" id="loginName" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required></label>
+    <label class="field"><span data-t="login.password"></span>
+      <input name="password" type="password" autocomplete="current-password" maxlength="200" required></label>
+    <div class="btns"><button class="btn" type="submit" data-t="login.submit"></button></div>
+    <button class="btn switch" id="toRegister" type="button" data-go="register"></button>
+    <p class="muted" id="inviteOnly" data-t="login.inviteOnly" hidden></p>
+    <p class="muted" data-t="login.forgotHint"></p>
+  </form>
+
+  <form class="sheet panel" id="register" method="post" action="/login" hidden>
+    <h2 id="registerTitle"></h2>
+    <p id="intro"></p>
+    <p class="err" id="registerErr" hidden></p>
+    <label class="field"><span data-t="register.name"></span>
+      <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="32" required></label>
+    <label class="field"><span data-t="register.password"></span>
+      <input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="200" required></label>
+    <div data-rules="register"></div>
+    <label class="field"><span data-t="register.again"></span>
+      <input name="again" type="password" autocomplete="new-password" minlength="8" maxlength="200" required></label>
+    <p class="muted" data-t="register.security"></p>
+    <div class="btns"><button class="btn" type="submit" data-t="register.submit"></button></div>
+    <button class="btn switch" type="button" data-go="login" data-t="register.toLogin"></button>
+  </form>
+
+  <nav class="langs" id="langs" aria-label="Language"></nav>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+const PANELS = ['login', 'register'];
+
+// invite links: /login#join=…; the code never reaches server logs
+const hash = new URLSearchParams(location.hash.slice(1));
+let code = hash.get('join');
+// open: anyone may sign up; invite: only with an invite link
+let invite = null, mode = 'login', errs = {}, registration = 'open';
+
+function intro() {
+  if (!invite) return t('register.intro');
+  return t('register.introInvite', { by: invite.by || t('register.someone'), group: invite.group });
+}
+
+function render() {
+  translatePage();
+  for (const p of PANELS) $('#' + p).hidden = p !== mode;
+  $('#registerTitle').textContent = t(invite ? 'register.invite' : 'register.title');
+  $('#intro').textContent = intro();
+  $('#toRegister').textContent = t(invite ? 'login.toInvite' : 'login.toRegister');
+  const closed = registration === 'invite' && !invite;
+  $('#toRegister').hidden = closed;
+  $('#inviteOnly').hidden = !closed;
+  // errors are kept as keys, so switching the language translates them too
+  for (const p of PANELS) {
+    const e = errs[p], box = $(`#${p}Err`);
+    box.textContent = e ? (e.key ? t(e.key, e.vars) : e.message) : '';
+    box.hidden = !e;
+  }
+  $('#langs').replaceChildren(...Object.entries(LANGS).map(([k, name]) => {
+    const b = Object.assign(document.createElement('button'), { type: 'button', className: 'btn', textContent: name });
+    b.setAttribute('aria-pressed', k === lang);
+    b.onclick = () => { setLang(k); render(); };
+    return b;
+  }));
+  document.title = t('app.name');
+}
+
+function show(which) {
+  mode = which;
+  errs = {};
+  render();
+  // first empty field; don't pop the keyboard open on phones
+  const inputs = [...$('#' + which).querySelectorAll('input:not([hidden])')];
+  if (inputs.length && !matchMedia('(pointer: coarse)').matches) (inputs.find(i => !i.value) || inputs[0]).focus();
+}
+for (const b of document.querySelectorAll('[data-go]')) b.onclick = () => show(b.dataset.go);
+
+// password rules that tick off while typing
+{
+  const reg = $('#register');
+  const regRules = pwChecklist(reg.password, () => reg.username.value.trim());
+  reg.username.addEventListener('input', regRules.update);
+  reg.querySelector('[data-rules]').replaceWith(regRules);
+}
+
+function error(panel, err) {
+  errs[panel] = { code: err.code, key: err.code && I18N[lang]['err.' + err.code] ? 'err.' + err.code : null, message: err.message };
+  render();
+}
+
+// after login with a pending invite, the app asks whether to join the group
+const done = () => location.replace(invite ? '/#join=' + encodeURIComponent(code) : '/');
+
+// runs a form's request with the submit button disabled
+function submit(form, fn) {
+  $('#' + form).onsubmit = async e => {
+    e.preventDefault();
+    const btn = e.target.querySelector('[type=submit]');
+    btn.disabled = true;
+    try { await fn(e.target); } catch (err) { error(form, err); }
+    btn.disabled = false;
+  };
+}
+
+submit('login', async f => {
+  try {
+    const me = await request('POST', '/api/login', { name: f.username.value.trim(), password: f.password.value });
+    store.set('shop.user', me.user.name);
+    if (!langChosen() && me.user.lang) setLang(me.user.lang);
+    done();
+  } catch (err) {
+    f.password.value = '';
+    throw err;
+  }
+});
+
+// the new account is signed in right away; with an invite it is already in that group
+submit('register', async f => {
+  if (f.password.value !== f.again.value) throw Object.assign(new Error(t('err.pw_mismatch')), { code: 'pw_mismatch' });
+  const me = await request('POST', '/api/register', { code: code || undefined, name: f.username.value.trim(), password: f.password.value, lang });
+  store.set('shop.user', me.user.name);
+  setLang(lang);
+  location.replace('/');
+});
+
+(async () => {
+  $('#loginName').value = store.get('shop.user') || '';
+  try { ({ registration } = await request('GET', '/api/setup')); } catch {}
+  if (!code) return show(hash.has('register') || registration === 'first' ? 'register' : 'login');
+  try { invite = await request('GET', '/api/invite/' + encodeURIComponent(code)); }
+  catch (err) { code = null; show('login'); return error('login', err); }
+  show('register');
+})();
+</script>
+</body>
+</html>
